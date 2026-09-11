@@ -1,2 +1,18 @@
-# Auto detect text files and perform LF normalization
+# 统一换行符归一化：仓库内存 LF，检出时由 Git 按平台决定
+# （本机 core.autocrlf=true 只是本地设置，提交该文件可让任何克隆端行为一致）
 * text=auto
+
+# Shell 脚本在 Linux 容器内执行，必须保持 LF
+*.sh text eol=lf
+
+# 二进制文件不做换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+*.db binary

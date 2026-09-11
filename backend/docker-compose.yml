@@ -1,0 +1,140 @@
+# 注意：Compose v2 不再需要 version 字段（写 version: "3.8" 会告警且已过时），
+#       condition: service_healthy 由 v2 直接支持。
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: xiaona_postgres
+    environment:
+      POSTGRES_USER: xiaona
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-xiaona_pass}
+      POSTGRES_DB: xiaona
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U xiaona -d xiaona"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  chroma:
+    # 版本锁死 1.0.0：与 backend 客户端 chromadb==1.0.0 对齐（防止 latest 漂移导致客户端/服务端不匹配）
+    image: chromadb/chroma:1.0.0
+    container_name: xiaona_chroma
+    volumes:
+      - chroma_data:/chroma/chroma
+    ports:
+      - "8001:8000"
+    # 新版 chroma 镜像无 python/curl/wget，且已废弃 v1 API（返回 410），
+    # 故用 bash /dev/tcp 探测 v2 心跳接口（实测 HTTP 200）。
+    # 注意：CMD-SHELL 默认走 /bin/sh（dash），不支持 /dev/tcp，须显式 bash -c
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8000 && printf \"GET /api/v2/heartbeat HTTP/1.0\\r\\n\\r\\n\" >&3 && head -1 <&3 | grep -q \"200 OK\"'"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  neo4j:
+    image: neo4j:5-community
+    container_name: xiaona_neo4j
+    environment:
+      NEO4J_AUTH: ${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-xiaona_pass}
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u ${NEO4J_USER:-neo4j} -p ${NEO4J_PASSWORD:-xiaona_pass} 'RETURN 1'"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  backend:
+    build:
+      context: ../backend
+      dockerfile: Dockerfile
+      # BuildKit 构建代理：让容器内 pip install 走宿主机 Clash（host.docker.internal
+      # 是 Docker Desktop 的宿主机别名；Dockerfile 内已默认清华 pip 源作兜底）
+      args:
+        HTTP_PROXY: http://host.docker.internal:7890
+        HTTPS_PROXY: http://host.docker.internal:7890
+        NO_PROXY: localhost,127.0.0.1
+    container_name: xiaona_backend
+    # healthcheck 依赖 GET /api/health（无需认证，见 01 §5.6）
+    environment:
+      DATABASE_URL: postgresql://xiaona:${DB_PASSWORD:-xiaona_pass}@postgres:5432/xiaona
+      CHROMA_HOST: chroma
+      CHROMA_PORT: 8000
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: ${NEO4J_USER:-neo4j}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-xiaona_pass}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      JWT_SECRET: ${JWT_SECRET:-dev-secret-change-me}
+      FEISHU_APP_ID: ${FEISHU_APP_ID:-}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET:-}
+      FEISHU_VERIFY_TOKEN: ${FEISHU_VERIFY_TOKEN:-}
+      FEISHU_ENCRYPT_KEY: ${FEISHU_ENCRYPT_KEY:-}
+      FEISHU_BOT_OPEN_ID: ${FEISHU_BOT_OPEN_ID:-}
+      FEISHU_BOT_NAME: ${FEISHU_BOT_NAME:-XIAONA}
+      # 标记运行在容器内：llm_provider 据此把用户填的 localhost 自动解析为宿主机
+      #（Ollama 等本地模型 base_url 可直接填 http://localhost:11434）
+      XIAONA_IN_DOCKER: "1"
+    # 让 host.docker.internal 在 Linux 主机也解析到宿主机（Docker Desktop 内置该别名，
+    # 此处 host-gateway 对其同样生效），供本地模型连通性测试与扫描使用
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      postgres:
+        condition: service_healthy
+      chroma:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    # 任务产物（PDF/Word/Excel）落盘目录挂载：容器 /app/artifacts ↔ 宿主机
+    # d:\XIAONA\artifacts（ARTIFACTS_DIR 默认 backend/artifacts，容器内 WORKDIR /app 即
+    # /app/artifacts）。此前无挂载、产物只存在于容器内，用户在宿主机找不到生成的
+    # PDF/Word（2026-08-24 起）。代码本身仍由镜像内 COPY 提供，不整包挂载热重载
+    volumes:
+      - ../artifacts:/app/artifacts
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  frontend:
+    build:
+      context: ../frontend
+      dockerfile: Dockerfile
+      # BuildKit 构建代理：让容器内 npm install 走宿主机 Clash（Dockerfile 内已默认 npmmirror 作兜底）
+      args:
+        HTTP_PROXY: http://host.docker.internal:7890
+        HTTPS_PROXY: http://host.docker.internal:7890
+        NO_PROXY: localhost,127.0.0.1
+    container_name: xiaona_frontend
+    ports:
+      - "8080:80"          # 映射到 8080，避免 80 在 Windows/macOS 需要管理员权限
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  # 显式指定卷名（name:），与 09 备份脚本 -v xiaona_*_data 的挂载名保持一致；
+  # 否则 Compose 会生成项目名前缀卷（如 backend_neo4j_data），备份脚本会挂载到空卷。
+  pg_data:
+    name: xiaona_pg_data
+  chroma_data:
+    name: xiaona_chroma_data
+  neo4j_data:
+    name: xiaona_neo4j_data
+  neo4j_logs:
+    name: xiaona_neo4j_logs
+  neo4j_dumps:    # 供 09 备份脚本的 Neo4j dump 中转（临时容器挂载）
+    name: xiaona_neo4j_dumps

@@ -1,0 +1,6 @@
+# XIAONA CLI 依赖（11 §3）
+requests
+sounddevice
+soundfile
+simpleaudio
+numpy

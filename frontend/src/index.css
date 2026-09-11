@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html, body, #root {
+  height: 100%;
+}
+
+body {
+  @apply bg-slate-50 text-slate-800 antialiased;
+}
+
+/* 统一输入框样式：圆角、浅边框、focus 时主色环 */
+.input-base {
+  @apply w-full border border-slate-300 rounded-lg px-3 py-2 text-sm outline-none transition
+    focus:ring-2 focus:ring-indigo-200 focus:border-indigo-400;
+}
+
+/* 统一渐变主按钮 */
+.btn-primary {
+  @apply bg-gradient-to-r from-indigo-500 to-violet-500 text-white py-2 rounded-lg text-sm font-medium
+    hover:from-indigo-600 hover:to-violet-600 disabled:opacity-50 transition;
+}
+
+/* 统一次级按钮 */
+.btn-secondary {
+  @apply bg-white border border-slate-300 text-slate-600 px-3 py-1.5 rounded-lg text-sm
+    hover:bg-slate-50 hover:text-slate-800 transition;
+}
